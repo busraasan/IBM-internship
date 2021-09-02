@@ -7,74 +7,67 @@ from fpdf import FPDF
 from PIL import Image
 import glob
 
+import pymongo
+import pandas as pd
+import json
+
 WIDTH = 210
 HEIGHT = 297
 
+#HELPER FUNCTIONS
 def read_from_database(mongo_ip):
-
     iris = sqlC.read.format("com.mongodb.spark.sql.DefaultSource").option("uri", mongo_ip + "Iris").load()
     iris.createOrReplaceTempView("iris")
     iris = sqlC.sql("SELECT * FROM iris")
     #iris = iris.withColumn("Processor", iris["Processor"].cast("string"))
     return iris
 
+def load_to_database(path_to_xlsx, database_name):
+    client = pymongo.MongoClient("mongodb://localhost:27017") #connect to local server
+    df = pd.read_excel(path_to_xlsx) #read from xlsx file
+    data = df.to_dict(orient = "records") #insert data into a dictionary and choose the type of values as records
+    db = client[database_name] #construct db
+    db.Iris.insert_many(data) #insert data into db
+
+#by creating RDD's manually, optimize the memory used and shorten execution time.
+def create_partition(dataframe, sparkcontext):
+    dataframe.repartition(6).createOrReplaceTempView('sf_view')
+    sparkcontext.catalog.cacheTable('sf_view')
+    dataframe = sparkcontext.table('sf_view')
+    return dataframe
+
+#Extract a dataframe for every client using _Total values for Processor
+def extract_dataframes(dataframe):
+    clients = dataframe.withColumn('Server_Name', dataframe['Server_Name'].substr(0, 3)).select('Server_Name').distinct().toPandas()["Server_Name"].values.tolist()
+    client_dataframes = {}
+    for client in clients:
+        client_dataframes[client] = dataframe.filter(dataframe.Server_Name.contains(client) & dataframe.Processor.contains('_Total')) #take every row for a client which includes total processor usage data.
+    return clients, client_dataframes
+
+
 class Client:
-    def __init__(self, dataframe, sparkcontext, client_name):
-        self.client_dataframe = dataframe
+    def __init__(self, client_dataframe, sparkcontext, client_name):
+        self.client_dataframe = client_dataframe
         self.sparkcontext = sparkcontext
 
-        self.client = client_name
-        self.hostnames = dataframe.withColumn('Server_Name', dataframe['Server_Name'].substr(0, 3)).select('Server_Name').distinct().toPandas()["Server_Name"].values.tolist()
+        self.client_name = client_name
+        self.hostnames = self.client_dataframe.withColumn('Server_Name', self.client_dataframe['Server_Name'].substr(5, 1)).select('Server_Name').distinct().toPandas()["Server_Name"].values.tolist()
+        self.hostnames = sorted(self.hostnames) #sort hostnames alphabetically
         
-        self.hosts_dataframes = {}
+        self.hosts_dataframes = {} #Holds dataframes for every host of a client. Keys are hostnames.
 
-        for host in hostnames:
-            hosts_dataframes[host] = self.dataframe[client].filter(self.dataframe[client].Server_Name.contains(host))
+        for host in self.hostnames:
+            self.hosts_dataframes[host] = self.client_dataframe.filter(self.client_dataframe.Server_Name.contains(host)) #take every row includes the name of the host
         
-
-class Graphs:
-    def __init__(self, dataframe, sparkcontext):
-
-        self.dataframe = dataframe
-        self.sparkcontext = sparkcontext
-        self.client_dataframes = []
-        self.host_dataframes = []
-
-        self.create_partition()
+        #mesaj gidiyo motor donmuyo hero kodu degmis olabilir
         
-        #extract client names from server_name
-        self.clients = dataframe.withColumn('Server_Name', dataframe['Server_Name'].substr(0, 3)).select('Server_Name').distinct().toPandas()["Server_Name"].values.tolist()
-        self.client_hosts = []
+#Report template for CPU usage
+class Report:
+    def __init__(self, client):
 
-        #extract hostnames for each client
-        for i in self.clients:
-            hostnames = dataframe.filter(dataframe.Server_Name.contains(i)).withColumn('Server_Name', dataframe['Server_Name'].substr(5,1)).select('Server_Name').distinct().toPandas()["Server_Name"].values.tolist()
-            self.client_hosts.append(hostnames)
-
-        #create a dictionary stores the names of the clients and hosts of them
-        self.client_data = {}
-        for i in range(0, len(self.clients)):
-            self.client_data[self.clients[i]] = self.client_hosts[i]
-
-        #dictionary for dataframes
-        self.host_client_dfs = {} #stores data of all clients hosts seperately as df
-        self.client_dfs = {} #stores data of all clients seperately as df
-
-        self.extract_dataframes()
+        #client object will be passed and graphs related to that client will be printed as a seperate pdf.
+        self.client = client
         self.create_pdf()
-
-    def extract_dataframes(self):
-        for client in self.clients:
-            self.client_dfs[client] = self.dataframe.filter(self.dataframe.Server_Name.contains(client) & self.dataframe.Processor.contains('_Total')) #take every row for a client which includes total processor usage data.
-            for host_info in self.client_data[client]:
-                self.host_dataframes.append(self.client_dfs[client].filter(self.client_dfs[client].Server_Name.contains(host_info)))
-            self.host_client_dfs[client] = self.host_dataframes
-
-    #by creating RDD's manually, optimize the memory used and shorten execution time.
-    def create_partition(self):
-        self.dataframe.repartition(6).createOrReplaceTempView('sf_view')
-        self.sparkcontext.catalog.cacheTable('sf_view')
-        self.dataframe = self.sparkcontext.table('sf_view')
 
     def hourly_usage_for_every_host(self, pdf):
 
@@ -83,35 +76,34 @@ class Graphs:
         figure_num = 0
         page_num = 1
         minus = 0
-        for client in self.clients:
-            print(client)
-            for host in self.client_data[client]:
-                title = "Hourly CPU Usage for " + client + " with host " + host
-                self.line_chart(title, self.host_client_dfs[client][host_num], host, client)
-                host_num += 1
-                if(host_num % 2 == 0):
-                    pdf.image("/home/basan/internship-codes/charts/"+client+host+'.jpg', 5, 80*chart_row-minus, WIDTH/2-5)
-                    chart_row += 1
-                    figure_num += 1
-                else:
-                    pdf.image("/home/basan/internship-codes/charts/"+client+host+'.jpg', WIDTH/2+5, 80*chart_row-minus, WIDTH/2-5)
-                    figure_num +=1
-                
-                if(page_num > 1 and figure_num == 6):
-                    pdf.add_page()
-                    self.footer(pdf)
-                    self.line_header(pdf)
-                    figure_num = 0
-                    chart_row = 1
-                    page_num += 1
+        for host in self.client.hostnames:
+            title = "Hourly CPU Usage for " + self.client.client_name + " with host " + host
+            self.line_chart(title, self.client.hosts_dataframes[host], host, self.client.client_name)
+            host_num += 1
+            if(host_num % 2 == 1):
+                pdf.image("/home/basan/internship-codes/charts/"+self.client.client_name+host+'.jpg', 5, 80*chart_row-minus, WIDTH/2-5)
+                figure_num += 1
+            else:
+                pdf.image("/home/basan/internship-codes/charts/"+self.client.client_name+host+'.jpg', WIDTH/2+5, 80*chart_row-minus, WIDTH/2-5)
+                figure_num +=1
+                chart_row += 1
             
-                elif(page_num <= 1 and figure_num == 4):
-                    pdf.add_page()
-                    self.footer(pdf)
-                    figure_num = 0
-                    chart_row = 1
-                    page_num += 1
-                    minus = 50
+            if(page_num > 1 and figure_num == 6):
+                pdf.add_page()
+                self.footer(pdf)
+                self.line_header(pdf)
+                figure_num = 0
+                chart_row = 1
+                page_num += 1
+        
+            elif(page_num <= 1 and figure_num == 4):
+                pdf.add_page()
+                self.footer(pdf)
+                self.line_header(pdf)
+                figure_num = 0
+                chart_row = 1
+                page_num += 1
+                minus = 50
                     
 
     #function for PDF output. It's blurry now but it will be fixed.
@@ -128,7 +120,7 @@ class Graphs:
 
     def line_header(self, pdf):
         #pdf.image("/home/basan/internship-codes/arkaheader.png",0,0,WIDTH)
-        pdf.image("/home/basan/internship-codes/ibmlogo.png", 170, 20, 15)
+        pdf.image("/home/basan/internship-codes/ibmlogo.png", 183, 20, 15)
 
     def footer(self, pdf):
         pdf.image("/home/basan/internship-codes/altheader.png", 0, 285, WIDTH)
@@ -139,9 +131,6 @@ class Graphs:
 
     def create_pdf(self):
         
-        #self.draw_hourly_chart("hh")
-        #self.line_chart("line chart")
-        #self.client_usage()
         pdf = FPDF()
         pdf.set_auto_page_break(False, 0)
         pdf.add_page()
@@ -149,25 +138,9 @@ class Graphs:
         self.traingle_header(pdf, day)
         self.footer(pdf)
         pdf.set_auto_page_break(True)
-
         self.hourly_usage_for_every_host(pdf)
 
-        # im1 = "/home/basan/internship-codes/draw_hourly_chart.jpg"
-        # im2 = "/home/basan/internship-codes/line_chart.jpg"
-        # im3 = "/home/basan/internship-codes/client_usage.jpg"
-
-        # pdf.image(im1, 5, 80, WIDTH/2-5)
-        # pdf.image(im2, WIDTH/2+5, 80, WIDTH/2-5)
-        # pdf.image(im3, 5, 160, WIDTH/2-5)
-
-        # imagelist = [im1, im2, im3]
-        # k = -1
-        # for image in imagelist:
-        #     k *= -1
-        #     pdf.image(image, 5, 30, WIDTH/2+k*5)
-
-        # save the pdf with name .pdf
-        pdf.output("example1.pdf")   
+        pdf.output("cpu-reports/" + self.client.client_name+"-example1.pdf")   
 
     #a chart that shows 24 hour CPU usage for an host of a single client.
     def draw_hourly_chart(self, title, df):
@@ -181,7 +154,7 @@ class Graphs:
         
         for anhour in client_hours.collect():
             x.append(anhour[0]) #insert hour names into array to be used in x axis
-            #her saat için avg processor time columnı topla
+            #her saat icin avg processor time columni topla
             df_for_hour = df.filter(hour('HR_Time') == lit(anhour[0])).groupBy().sum('AVG_%_Processor_Time')
             temp.append(df_for_hour.toPandas()["sum(AVG_%_Processor_Time)"].values.tolist())
             
@@ -213,7 +186,7 @@ class Graphs:
         
         for anhour in client_hours.collect():
             x.append(anhour[0]) #insert hour names into array to be used in x axis
-            #her saat için avg processor time columnı topla
+            #her saat icin avg processor time columni topla
             df_for_hour = df.filter(hour('HR_Time') == lit(anhour[0])).groupBy().sum('AVG_%_Processor_Time')
             temp.append(df_for_hour.toPandas()["sum(AVG_%_Processor_Time)"].values.tolist())
             
@@ -276,8 +249,18 @@ if __name__ == "__main__":
     .appName('newApp') \
     .getOrCreate()
 
-
     mongo_ip = "mongodb://localhost:27017/basanto."
     iris = read_from_database(mongo_ip)
+    dataframe = create_partition(iris, spark)
 
-    Graphs(iris, spark)
+    clients = [] #names of clients
+    client_dataframes = {} #dataframes of clients
+    clients, client_dataframes = extract_dataframes(dataframe)
+    client_objects = {} #dictionary of client objects
+
+    for client in clients:
+        client_objects[client] = Client(client_dataframes[client], spark, client)
+        print(client)
+        Report(client_objects[client])
+        
+    
