@@ -6,6 +6,8 @@ from pyspark.sql.functions import *
 from fpdf import FPDF
 from PIL import Image
 import glob
+import matplotlib.cm as cm
+import numpy as np
 
 import pymongo
 import pandas as pd
@@ -62,51 +64,93 @@ class Client:
         #mesaj gidiyo motor donmuyo hero kodu degmis olabilir
         
 #Report template for CPU usage
-class Report:
+class ClientReport:
     def __init__(self, client):
 
         #client object will be passed and graphs related to that client will be printed as a seperate pdf.
         self.client = client
+
+        self.chart_row = 1
+        self.figure_num = 0
+        self.page_num = 1
+        self.minus = 0
+        self.figure_per_page_num = 0
+
         self.create_pdf()
 
-    def hourly_usage_for_every_host(self, pdf):
+    def add_figure(self, path, pdf, width, is_last):
 
-        host_num = 0
-        chart_row = 1
-        figure_num = 0
-        page_num = 1
-        minus = 0
-        for host in self.client.hostnames:
-            title = "Hourly CPU Usage for " + self.client.client_name + " with host " + host
-            self.line_chart(title, self.client.hosts_dataframes[host], host, self.client.client_name)
-            host_num += 1
-            if(host_num % 2 == 1):
-                pdf.image("/home/basan/internship-codes/charts/"+self.client.client_name+host+'.jpg', 5, 80*chart_row-minus, WIDTH/2-5)
-                figure_num += 1
-            else:
-                pdf.image("/home/basan/internship-codes/charts/"+self.client.client_name+host+'.jpg', WIDTH/2+5, 80*chart_row-minus, WIDTH/2-5)
-                figure_num +=1
-                chart_row += 1
+        if(self.figure_num % 2 == 0 or width > WIDTH/2-5):
             
-            if(page_num > 1 and figure_num == 6):
-                pdf.add_page()
-                self.footer(pdf)
-                self.line_header(pdf)
-                figure_num = 0
-                chart_row = 1
-                page_num += 1
+            if(width > WIDTH/2-5):
+                pdf.image(path, 40, 80*self.chart_row-self.minus, width)
+                self.figure_num += 2
+                self.figure_per_page_num +=2
+            else:
+                pdf.image(path, 5, 80*self.chart_row-self.minus, width)
+                self.figure_per_page_num += 1
+                self.figure_num += 1
+            #self.y = 80*chart_row-minus
+            #self.x = WIDTH/2+5
+        else:
+            pdf.image(path, WIDTH/2+5, 80*self.chart_row-self.minus, width)
+            self.figure_per_page_num +=1
+            self.chart_row += 1
+            self.figure_num += 1
+            #self.y = 80*self.chart_row-self.minus
+            #self.x = 5
         
-            elif(page_num <= 1 and figure_num == 4):
+        if (not is_last):
+            if(self.page_num > 1 and self.figure_per_page_num == 6):
                 pdf.add_page()
                 self.footer(pdf)
                 self.line_header(pdf)
-                figure_num = 0
-                chart_row = 1
-                page_num += 1
-                minus = 50
-                    
+                self.figure_per_page_num = 0
+                self.chart_row = 1
+                self.page_num += 1
 
-    #function for PDF output. It's blurry now but it will be fixed.
+            elif(self.page_num == 1 and self.figure_per_page_num == 4):
+                pdf.add_page()
+                self.footer(pdf)
+                self.line_header(pdf)
+                self.figure_per_page_num = 0
+                self.chart_row = 1
+                self.page_num += 1
+                self.minus = 50
+
+
+    def usage_for_every_host(self, pdf):
+        i = 0
+        is_last = False
+        for host in self.client.hostnames:
+            i+=1
+            if(i == len(self.client.hostnames)):
+                is_last == True
+            # if(self.page_num == 1):
+            #     offset = self.chart_row*50
+            # else:
+            offset = 75
+            if(self.figure_per_page_num==0 and self.page_num > 1):
+                offset = 23
+            elif(self.figure_per_page_num != 0):
+                offset += 7
+
+            #pdf.cell(w=0, txt = "Charts for host "+host, ln = 1, align = 'L')
+            pdf.ln(offset)
+            pdf.set_font('Arial', '',10)
+            pdf.write(3,"            Charts for host "+host);
+            title = "Hourly CPU Usage for " + self.client.client_name + " with host " + host
+            title2 = "Weekly CPU Usage for " + self.client.client_name + " with host " + host
+            self.hourly_line_chart(title, self.client.hosts_dataframes[host], host, self.client.client_name)
+            self.weekly_bar_chart(title2, self.client.hosts_dataframes[host], host, self.client.client_name)
+            path = "/home/basan/internship-codes/charts/"+self.client.client_name+host+'.jpg'
+            path2 = "/home/basan/internship-codes/charts/weekly"+self.client.client_name+host+'.jpg'
+            width = WIDTH/2-5
+            self.add_figure(path, pdf, width, is_last)
+            self.add_figure(path2, pdf, width, is_last)
+            
+
+    #function for PDF output.
     def traingle_header(self, pdf, day):
         pdf.image("/home/basan/internship-codes/letterhead.png",0,0,WIDTH)
         pdf.image("/home/basan/internship-codes/ibmlogo.png", 170, 20, 25)
@@ -134,48 +178,55 @@ class Report:
         pdf = FPDF()
         pdf.set_auto_page_break(False, 0)
         pdf.add_page()
+        pdf.set_margins(13,0,0)
         day = "01/09/2021"
         self.traingle_header(pdf, day)
         self.footer(pdf)
-        pdf.set_auto_page_break(True)
-        self.hourly_usage_for_every_host(pdf)
-
+        #pdf.set_auto_page_break(True)
+        self.usage_for_every_host(pdf)
+        path, width = self.all_hosts_pie_chart(pdf)
+        self.add_figure(path, pdf, width, True)
+        
         pdf.output("cpu-reports/" + self.client.client_name+"-example1.pdf")   
 
-    #a chart that shows 24 hour CPU usage for an host of a single client.
-    def draw_hourly_chart(self, title, df):
+    #a chart that shows weekly CPU usage for an host of a single client. (7 days)
+    #Hangi gunler daha cok kullanilmis
+    def weekly_bar_chart(self, title, df, hostname, clientname):
         plt.clf()
-        client_hours = df.select(hour('HR_Time')).distinct().orderBy('hour(HR_Time)')
+        client_days = df.select(dayofweek('HR_Time')).distinct().orderBy('dayofweek(HR_Time)')
         #empty arrays to be filled (will be used in matplotlib graphs)
-        x = []
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        x =[]
         y = []
         temp = []
-        days = 31
+        weeks = 4*24
         
-        for anhour in client_hours.collect():
-            x.append(anhour[0]) #insert hour names into array to be used in x axis
+        for aday in client_days.collect():
+            x.append(aday[0])
             #her saat icin avg processor time columni topla
-            df_for_hour = df.filter(hour('HR_Time') == lit(anhour[0])).groupBy().sum('AVG_%_Processor_Time')
-            temp.append(df_for_hour.toPandas()["sum(AVG_%_Processor_Time)"].values.tolist())
+            df_for_day = df.filter(dayofweek('HR_Time') == lit(aday[0])).groupBy().sum('AVG_%_Processor_Time')
+            temp.append(df_for_day.toPandas()["sum(AVG_%_Processor_Time)"].values.tolist())
             
         for i in range(0,len(temp)):
             y.append(temp[i][0])
             
-        y1 = [value / days for value in y]
+        y1 = [value / weeks for value in y]
             
         plt.rcParams['axes.edgecolor']='#333F4B'
         plt.rcParams['axes.linewidth']=0.8
         plt.rcParams['xtick.color']='#333F4B'
         plt.rcParams['ytick.color']='#333F4B'
     
-        plt.xticks(x)
+        plt.xticks(x, labels)
         plt.title(title)
         plt.bar(x,y1,color=(0.2, 0.4, 0.6, 0.6))
         #ax = sns.barplot(y= "Deaths", x = "Causes", data = deaths_pd, palette=("Blues_d"))
         #sns.set_context("poster")
-        plt.savefig('draw_hourly_chart.jpg')
+        plt.savefig('./charts/weekly'+clientname+hostname+'.jpg')
     
-    def line_chart(self, title, df, hostname, clientname):
+    #a chart that shows hourly CPU usage for an host of a single client (24 hours).
+    #Hangi saatler daha cok kullanilmis
+    def hourly_line_chart(self, title, df, hostname, clientname):
         plt.clf()
         client_hours = df.select(hour('HR_Time')).distinct().orderBy('hour(HR_Time)')
         #empty arrays to be filled (will be used in matplotlib graphs)
@@ -205,8 +256,41 @@ class Report:
         plt.plot(x,y1)
         plt.grid(True)
         plt.savefig('./charts/'+clientname+hostname+'.jpg')
+
+    #a chart that shows total percentage usage of CPU of every host
+    #Hangi host daha cok kullanmis
+    def all_hosts_pie_chart(self, pdf):
+        plt.clf()
+        labels = self.client.hostnames
+        sizes = []
+        d2_sizes = []
+        for host in self.client.hostnames:
+            df = self.client.hosts_dataframes[host].select('AVG_%_Processor_Time').groupBy().sum()
+            d2_sizes.append(df.toPandas()["sum(AVG_%_Processor_Time)"].values.tolist())
         
-    
+        for i in range(0,len(d2_sizes)):
+            sizes.append(d2_sizes[i][0])
+
+        #fig1, ax1 = plt.subplots(figsize=(3, 3))
+        #fig1, ax1 = plt.subplots()
+        #fig1.subplots_adjust(0.1,0,1,1)
+
+        colors = cm.rainbow(np.linspace(0, 1, len(sizes)))
+        plt.gca().axis("equal")
+        plt.pie(sizes, labels=labels, colors=colors, autopct = '%1.1f%%', pctdistance=1.25, labeldistance=0.9, textprops={'fontsize': 8})
+        plt.title("Total Percentage Usage per Host in 1 month")
+        path = "/home/basan/internship-codes/charts/"+self.client.client_name+'allhosts.jpg'
+        #legend_labels = ['%s, %1.1f %%' % (l, s) for l, s in zip(labels, sizes)]
+        #plt.legend(pie[0], labels=labels, bbox_to_anchor=(0.5,0.5), loc='center right', fontsize=8)
+        #plt.subplots_adjust(left=0.1, bottom=0.1, right=0.11)
+        plt.savefig(path)
+        width = 3*WIDTH/5
+        return path, width
+        
+class OverallReport:
+    def __init__(self, dataframe):
+        self.dataframe = dataframe
+
     def client_usage(self):
         client_hours = []
         cli = []
@@ -225,17 +309,17 @@ class Report:
         sizes = cli
         labels = ['aig', 'eti', 'tuv', 'aho', 'zor']
 
-        fig1, ax1 = plt.subplots(figsize=(7, 7))
+        fig1, ax1 = plt.subplots(figsize=(3, 3))
         fig1.subplots_adjust(0.1,0,1,1)
 
         theme = plt.get_cmap('flag')
         ax1.set_prop_cycle("color", [theme(1. * i / len(sizes)) for i in range(len(sizes))])
 
-        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', shadow=True, startangle=90, radius=10000)
+        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', shadow=True, startangle=90, radius=100)
         ax1.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
         plt.title("Total Client Usage")
         plt.savefig('client_usage.jpg')
-        
+
 
 if __name__ == "__main__":
     conf = pyspark.SparkConf().set("spark.jars.packages", "org.mongodb.spark:mongo-spark-connector_2.12:3.0.1").setMaster("local").setAppName("newApp").setAll([("spark.driver.memory", "15g"), ("spark.executer.memory", "20g")])
@@ -261,6 +345,8 @@ if __name__ == "__main__":
     for client in clients:
         client_objects[client] = Client(client_dataframes[client], spark, client)
         print(client)
-        Report(client_objects[client])
+        ClientReport(client_objects[client])
+
+    OverallReport(dataframe)
         
     
